@@ -1227,6 +1227,42 @@ DERIVES_INTO = {
     "CrossRegionDetection": ("SmartMotionHuman", "SmartMotionVehicle"),
 }
 
+# Codes that only exist on devices with the SmartMotionDetect feature.
+SMART_MOTION_EVENT_CODES = frozenset({"SmartMotionHuman", "SmartMotionVehicle"})
+
+
+def subscribable_event_codes(coordinator) -> list:
+    """The event codes to put on the eventManager attach for this channel.
+
+    Some firmware (seen on IPC-HDW4631C-A 2.800.0000015.0.R, build 2020-04-30)
+    accepts an attach whose codes list names SmartMotionHuman/SmartMotionVehicle,
+    keeps the stream open and heartbeating, and then never delivers VideoMotion
+    or any other code on it. The same attach without those two codes delivers
+    everything. The SmartMotionDetect probe already tells us the device lacks
+    the feature, so do not ask for its events.
+
+    The SmartMotion sensors are not lost: translate_event_code still derives
+    them from CrossLine/CrossRegion events that carry an ObjectType.
+    """
+    events = list(coordinator.events or [])
+    supports_smart = bool(getattr(coordinator, "_supports_smart_motion_detection", False))
+    amcrest = False
+    try:
+        amcrest = coordinator.supports_smart_motion_detection_amcrest()
+    except Exception:  # pylint: disable=broad-except
+        amcrest = False
+    if supports_smart or amcrest:
+        return events
+    dropped = [e for e in events if e in SMART_MOTION_EVENT_CODES]
+    if dropped and not getattr(coordinator, "_smart_codes_drop_logged", False):
+        coordinator._smart_codes_drop_logged = True
+        _LOGGER.info(
+            "%s does not support smart motion detection; not subscribing to %s "
+            "(some firmware delivers no events at all when they are requested)",
+            coordinator.get_address(), ", ".join(dropped))
+    return [e for e in events if e not in SMART_MOTION_EVENT_CODES]
+
+
 class DahuaHostEventStream:
     """One event stream for a host, shared by every channel configured on it.
 
@@ -1282,7 +1318,7 @@ class DahuaHostEventStream:
         """
         union = set()
         for coordinator in self.coordinators:
-            union.update(coordinator.events or [])
+            union.update(subscribable_event_codes(coordinator))
         return frozenset(union)
 
     def register(self, coordinator) -> None:
